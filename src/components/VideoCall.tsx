@@ -113,21 +113,42 @@ export function VideoCall({
       pc.addTrack(track, localStream);
     });
 
-      pc.ontrack = (event) => {
-        console.log("Track received:", event.track.kind, event.streams);
-        const [remoteStreamFromEvent] = event.streams;
-        
-        if (remoteStreamFromEvent) {
-          setRemoteStream(remoteStreamFromEvent);
+        pc.ontrack = (event) => {
+          console.log("Track received:", event.track.kind, event.streams);
+          const [remoteStreamFromEvent] = event.streams;
           
-          if (event.track.kind === 'video') {
-            setHasRemoteVideo(true);
+          if (remoteStreamFromEvent) {
+            setRemoteStream(prev => {
+              if (prev) {
+                event.streams[0].getTracks().forEach(track => {
+                  if (!prev.getTracks().find(t => t.id === track.id)) {
+                    prev.addTrack(track);
+                  }
+                });
+                return prev;
+              }
+              return remoteStreamFromEvent;
+            });
+            
+            if (event.track.kind === 'video') {
+              setHasRemoteVideo(true);
+              if (userVideo.current) {
+                userVideo.current.srcObject = remoteStreamFromEvent;
+                userVideo.current.play().catch(e => console.error("Remote video play:", e));
+              }
+            }
+            
+            if (event.track.kind === 'audio') {
+              if (remoteAudio.current) {
+                remoteAudio.current.srcObject = remoteStreamFromEvent;
+                remoteAudio.current.play().catch(e => console.error("Remote audio play:", e));
+              }
+            }
+            
+            setIsConnecting(false);
+            setConnectionStatus("Connected");
           }
-          
-          setIsConnecting(false);
-          setConnectionStatus("Connected");
-        }
-      };
+        };
 
 
     pc.onicecandidate = async (event) => {
@@ -352,15 +373,25 @@ export function VideoCall({
         } : {}}
         className={`bg-zinc-950 overflow-hidden relative shadow-2xl pointer-events-auto ${isMinimized ? 'cursor-move border border-white/20' : ''}`}
       >
-        {/* Remote Video - Full Screen */}
-        {initialCallType === "video" && (
-          <video 
-            ref={userVideo} 
-            autoPlay 
-            playsInline 
-            className={`w-full h-full object-cover ${(!remoteStream || !hasRemoteVideo) ? 'hidden' : 'block'}`} 
-          />
-        )}
+        {/* Remote Video - Full Screen (Partner's Face) */}
+          {initialCallType === "video" && (
+            <video 
+              ref={userVideo} 
+              autoPlay 
+              playsInline
+              className={`w-full h-full object-cover ${(!remoteStream || !hasRemoteVideo) ? 'hidden' : 'block'}`} 
+            />
+          )}
+          
+          {/* Waiting for partner's video */}
+          {initialCallType === "video" && remoteStream && !hasRemoteVideo && !isConnecting && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950/80 z-10">
+              <div className="animate-pulse text-center">
+                <CameraOff className="w-16 h-16 text-white/30 mx-auto mb-4" />
+                <p className="text-sm font-bold uppercase tracking-widest text-white/40">Partner's camera is off</p>
+              </div>
+            </div>
+          )}
         
         {/* Avatar fallback when no remote video */}
         {(!remoteStream || !hasRemoteVideo || initialCallType === "voice") && (
@@ -385,36 +416,40 @@ export function VideoCall({
           </div>
         )}
 
-        {/* My Video - Small window on right side */}
-        {initialCallType === "video" && stream && !isMinimized && (
-          <motion.div 
-            drag
-            dragConstraints={{ left: -1000, right: 0, top: 0, bottom: 1000 }}
-            className="absolute top-6 right-6 w-28 sm:w-36 md:w-44 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl z-20 bg-black cursor-move"
-          >
-            <video 
-              ref={myVideo} 
-              autoPlay 
-              playsInline 
-              muted 
-              className="w-full h-full object-cover" 
-              style={{ transform: facingMode === "user" ? 'scaleX(-1)' : 'none' }} 
-            />
-            {isVideoOff && (
-              <div className="absolute inset-0 bg-zinc-900 flex items-center justify-center">
-                <CameraOff className="w-8 h-8 text-white/30" />
-              </div>
-            )}
-            {/* Flip camera button on self video */}
-            <Button 
-              onClick={flipCamera}
-              size="icon"
-              className="absolute bottom-2 right-2 h-8 w-8 rounded-full bg-black/60 backdrop-blur-md hover:bg-black/80 border border-white/10"
+        {/* My Video - Small window showing your own face */}
+          {initialCallType === "video" && stream && !isMinimized && (
+            <motion.div 
+              drag
+              dragConstraints={{ left: -1000, right: 0, top: 0, bottom: 1000 }}
+              className="absolute top-6 right-6 w-28 sm:w-36 md:w-44 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl z-20 bg-black cursor-move"
             >
-              <SwitchCamera className="w-4 h-4 text-white" />
-            </Button>
-          </motion.div>
-        )}
+              <video 
+                ref={myVideo} 
+                autoPlay 
+                playsInline 
+                muted 
+                className="w-full h-full object-cover" 
+                style={{ transform: facingMode === "user" ? 'scaleX(-1)' : 'none' }} 
+              />
+              {isVideoOff && (
+                <div className="absolute inset-0 bg-zinc-900 flex items-center justify-center">
+                  <CameraOff className="w-8 h-8 text-white/30" />
+                </div>
+              )}
+              {/* Label for self video */}
+              <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm px-2 py-1 rounded-full">
+                <span className="text-[8px] font-bold uppercase tracking-wider text-white/60">You</span>
+              </div>
+              {/* Flip camera button on self video */}
+              <Button 
+                onClick={flipCamera}
+                size="icon"
+                className="absolute bottom-2 right-2 h-8 w-8 rounded-full bg-black/60 backdrop-blur-md hover:bg-black/80 border border-white/10"
+              >
+                <SwitchCamera className="w-4 h-4 text-white" />
+              </Button>
+            </motion.div>
+          )}
 
         {/* Top Controls (Minimize/Maximize) */}
         <div className="absolute top-6 left-6 flex gap-2 z-40">
