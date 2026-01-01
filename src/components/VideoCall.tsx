@@ -58,31 +58,18 @@ export function VideoCall({
     }, [stream]);
 
     useEffect(() => {
-      const attachRemoteStream = async () => {
-        if (!remoteStream) return;
-
-        if (initialCallType === "video" && userVideo.current) {
-          userVideo.current.srcObject = remoteStream;
-          try {
-            await userVideo.current.play();
-            console.log("Remote video playing");
-          } catch (e) {
-            console.error("Remote video play failed:", e);
-          }
-        }
-        
-        if (remoteAudio.current) {
-          remoteAudio.current.srcObject = remoteStream;
-          try {
-            await remoteAudio.current.play();
-            console.log("Remote audio playing");
-          } catch (e) {
-            console.error("Remote audio play failed:", e);
-          }
-        }
-      };
-
-      attachRemoteStream();
+      if (userVideo.current && remoteStream && initialCallType === "video") {
+        userVideo.current.srcObject = remoteStream;
+        userVideo.current.onloadedmetadata = () => {
+          userVideo.current?.play().catch(e => console.error("Remote video play failed:", e));
+        };
+      }
+      if (remoteAudio.current && remoteStream) {
+        remoteAudio.current.srcObject = remoteStream;
+        remoteAudio.current.onloadedmetadata = () => {
+          remoteAudio.current?.play().catch(e => console.error("Remote audio play failed:", e));
+        };
+      }
     }, [remoteStream, initialCallType]);
 
 
@@ -128,16 +115,18 @@ export function VideoCall({
 
       pc.ontrack = (event) => {
         console.log("Track received:", event.track.kind, event.streams);
-        const incomingStream = event.streams[0] || new MediaStream([event.track]);
+        const [remoteStreamFromEvent] = event.streams;
         
-        setRemoteStream(incomingStream);
-        
-        if (event.track.kind === 'video') {
-          setHasRemoteVideo(true);
+        if (remoteStreamFromEvent) {
+          setRemoteStream(remoteStreamFromEvent);
+          
+          if (event.track.kind === 'video') {
+            setHasRemoteVideo(true);
+          }
+          
+          setIsConnecting(false);
+          setConnectionStatus("Connected");
         }
-        
-        setIsConnecting(false);
-        setConnectionStatus("Connected");
       };
 
 
@@ -213,27 +202,27 @@ export function VideoCall({
         }
 
         const channelId = [userId, contact.id].sort().join('-');
-          const channel = supabase.channel(`call-${channelId}`)
-            .on("postgres_changes", { event: "INSERT", schema: "public", table: "calls", filter: `receiver_id=eq.${userId}` }, async (payload) => {
-              const data = payload.new;
-              if (!peerConnection.current || data.caller_id !== contact.id) return;
-              const signalData = JSON.parse(data.signal_data);
+        const channel = supabase.channel(`call-${channelId}`)
+          .on("postgres_changes", { event: "INSERT", schema: "public", table: "calls", filter: `receiver_id=eq.${userId}` }, async (payload) => {
+            const data = payload.new;
+            if (!peerConnection.current) return;
+            const signalData = JSON.parse(data.signal_data);
 
-              if (data.type === "answer" && isInitiator && signalData.sdp && !hasAnswered.current) {
-                hasAnswered.current = true;
-                await peerConnection.current.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
-                remoteDescriptionSet.current = true;
-                await processQueuedCandidates(peerConnection.current);
-              } else if (data.type === "candidate" && signalData.candidate) {
-                if (remoteDescriptionSet.current) {
-                  await peerConnection.current.addIceCandidate(new RTCIceCandidate(signalData.candidate));
-                } else {
-                  iceCandidateQueue.current.push(signalData.candidate);
-                }
-              } else if (data.type === "end") {
-                endCall();
+            if (data.type === "answer" && isInitiator && signalData.sdp && !hasAnswered.current) {
+              hasAnswered.current = true;
+              await peerConnection.current.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+              remoteDescriptionSet.current = true;
+              await processQueuedCandidates(peerConnection.current);
+            } else if (data.type === "candidate" && signalData.candidate) {
+              if (remoteDescriptionSet.current) {
+                await peerConnection.current.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+              } else {
+                iceCandidateQueue.current.push(signalData.candidate);
               }
-            })
+            } else if (data.type === "end") {
+              endCall();
+            }
+          })
           .subscribe();
         channelRef.current = channel;
 
@@ -292,16 +281,25 @@ export function VideoCall({
   };
 
   const flipCamera = async () => {
-    if (!stream) return;
+    if (!stream || initialCallType !== "video") return;
     
     const newFacingMode = facingMode === "user" ? "environment" : "user";
-    setFacingMode(newFacingMode);
     
     try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      
+      if (videoDevices.length < 2) {
+        toast.error("Only one camera available");
+        return;
+      }
+      
       stream.getVideoTracks().forEach(track => track.stop());
       
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode },
+        video: { 
+          facingMode: { exact: newFacingMode }
+        },
         audio: false
       });
       
@@ -317,14 +315,60 @@ export function VideoCall({
       const audioTrack = stream.getAudioTracks()[0];
       const updatedStream = new MediaStream([newVideoTrack, audioTrack]);
       setStream(updatedStream);
+      setFacingMode(newFacingMode);
       
       if (myVideo.current) {
         myVideo.current.srcObject = updatedStream;
       }
+      
+      toast.success(newFacingMode === "environment" ? "Back camera" : "Front camera");
     } catch (err) {
       console.error("Failed to flip camera:", err);
+      
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        
+        if (videoDevices.length >= 2) {
+          const currentTrack = stream.getVideoTracks()[0];
+          const currentDeviceId = currentTrack?.getSettings()?.deviceId;
+          const otherDevice = videoDevices.find(d => d.deviceId !== currentDeviceId);
+          
+          if (otherDevice) {
+            stream.getVideoTracks().forEach(track => track.stop());
+            
+            const newStream = await navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { exact: otherDevice.deviceId } },
+              audio: false
+            });
+            
+            const newVideoTrack = newStream.getVideoTracks()[0];
+            
+            if (peerConnection.current) {
+              const sender = peerConnection.current.getSenders().find(s => s.track?.kind === 'video');
+              if (sender) {
+                await sender.replaceTrack(newVideoTrack);
+              }
+            }
+            
+            const audioTrack = stream.getAudioTracks()[0];
+            const updatedStream = new MediaStream([newVideoTrack, audioTrack]);
+            setStream(updatedStream);
+            setFacingMode(newFacingMode);
+            
+            if (myVideo.current) {
+              myVideo.current.srcObject = updatedStream;
+            }
+            
+            toast.success("Camera switched");
+            return;
+          }
+        }
+      } catch (fallbackErr) {
+        console.error("Fallback camera switch failed:", fallbackErr);
+      }
+      
       toast.error("Could not switch camera");
-      setFacingMode(facingMode);
     }
   };
 
